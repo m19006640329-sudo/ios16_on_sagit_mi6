@@ -1,0 +1,32 @@
+# device dumps: persist/modemst/fsg hold IMEI + calibration; live DT holds the serial
+backup/
+# dtb/sagit/*.dtb are compiled from the public MiCode msm8998 device trees,
+# not device dumps, and are needed for the probe/full boot image.
+dtb/*
+!dtb/sagit/
+!dtb/sagit/*.dtb
+recovery/
+# third-party/Apple sources fetched for reading
+research/
+# build output and local deliverables
+out/
+dist/
+shim/out/
+xnu/out/
+xnu/out-*/
+__pycache__/
+
+# local CI artifacts and platform tools
+xnu-kernel.zip
+tools/platform-tools/
+tools/platform-tools.zip
+*.ipsw
+*.dmg
+*.simg
+*.img
+wsl-*.log
+
+# source-derived sagit deliverables (no Apple/Qualcomm/device blobs)
+!artifacts/
+!artifacts/sagit/
+!artifacts/sagit/*
