@@ -1,0 +1,1307 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 6630131..a908598 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,8 @@ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sagit_touch_diag.c		standard
++bsd/dev/sagit_touch_i2c.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sagit_touch_diag.c b/bsd/dev/sagit_touch_diag.c
+new file mode 100644
+index 0000000..b338446
+--- /dev/null
++++ b/bsd/dev/sagit_touch_diag.c
+@@ -0,0 +1,124 @@
++/*
++ * sagit / MSM8998 touch handoff diagnostics. Read-only TLMM state only:
++ * no MMIO writes, no I2C commands, no regulator votes, no GPIO configuration.
++ * This is NOT a touch driver.
++ *
++ * MSM8998 has no QUPv3 "SE14" block on the touch bus: Mi 6 uses BLSP1 QUP5
++ * (i2c@c179000) with the pins muxed to GPIO87/88. The Synaptics RMI4 traffic
++ * therefore goes through the board-gated bit-bang path in sagit_touch_i2c.c,
++ * and there is no SE clock-vote register to inspect here.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++
++/* TLMM 0x03400000: EAST tile +0x900000, NORTH tile +0x500000 (pinctrl-msm8998) */
++#define SAGIT_EAST_PA        0x03d00000u
++#define SAGIT_NORTH_PA       0x03900000u
++#define SAGIT_RESET_PIN      89u
++#define SAGIT_SDA_PIN        87u
++#define SAGIT_SCL_PIN        88u
++#define SAGIT_IRQ_PIN        125u
++#define SAGIT_VDDIO_PIN      50u
++
++static uint32_t
++sagit_diag_read(vm_offset_t base, uint32_t off)
++{
++	uint32_t val = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return val;
++}
++
++static bool
++sagit_board_has_compat(const char *name, unsigned int length)
++{
++	DTEntry root;
++	const char *compat = NULL;
++	unsigned int size = 0;
++	if (SecureDTLookupEntry(NULL, "/", &root) != kSuccess ||
++	    SecureDTGetProperty(root, "compatible", (void const **)&compat, &size) != kSuccess ||
++	    compat == NULL || size < length + 1 || size > 4096) {
++		return false;
++	}
++	/* compatible is a bounded sequence of NUL-terminated tokens. */
++	for (unsigned int i = 0; i < size;) {
++		unsigned int start = i;
++		while (i < size && compat[i] != '\0') {
++			i++;
++		}
++		if (i == size) {
++			break;
++		}
++		if (i - start == length &&
++		    memcmp(compat + start, name, length + 1) == 0) {
++			return true;
++		}
++		i++;
++	}
++	return false;
++}
++
++bool
++sagit_touch_board(void)
++{
++	static const char sagit[] = "xiaomi,sagit";
++	static const char msm8998[] = "qcom,msm8998";
++	return sagit_board_has_compat(sagit, sizeof(sagit) - 1) ||
++	    sagit_board_has_compat(msm8998, sizeof(msm8998) - 1);
++}
++
++bool
++sagit_touch_i2c_board(void)
++{
++	static const char sagit[] = "xiaomi,sagit";
++	static const char msm8998[] = "qcom,msm8998";
++	/* Transport writes require BOTH identities, unlike the read-only probe. */
++	return sagit_board_has_compat(sagit, sizeof(sagit) - 1) &&
++	    sagit_board_has_compat(msm8998, sizeof(msm8998) - 1);
++}
++
++bool
++sweet_touch_board(void)
++{
++	static const char sm7150[] = "qcom,sm7150";
++	return !sagit_touch_board() &&
++	    sagit_board_has_compat(sm7150, sizeof(sm7150) - 1);
++}
++
++void
++sagit_touch_diag(void)
++{
++	int enabled = 0;
++	vm_offset_t east, north;
++	if (!sagit_touch_board()) {
++		return;
++	}
++	(void)PE_parse_boot_argn("sagittouchdiag", &enabled, sizeof(enabled));
++	if (enabled != 1) {
++		printf("SAGIT TOUCH: read-only diagnostics off (sagittouchdiag=1)\n");
++		return;
++	}
++	east = ml_io_map(SAGIT_EAST_PA, 0x80000);
++	north = ml_io_map(SAGIT_NORTH_PA, 0x64000);
++	if (east && north) {
++		printf("SAGIT TOUCH: gpio87=%#x/%#x 88=%#x/%#x 89=%#x/%#x 125=%#x/%#x 50=%#x/%#x\n",
++		    sagit_diag_read(east, SAGIT_SDA_PIN * 0x1000u),
++		    sagit_diag_read(east, SAGIT_SDA_PIN * 0x1000u + 4),
++		    sagit_diag_read(east, SAGIT_SCL_PIN * 0x1000u),
++		    sagit_diag_read(east, SAGIT_SCL_PIN * 0x1000u + 4),
++		    sagit_diag_read(east, SAGIT_RESET_PIN * 0x1000u),
++		    sagit_diag_read(east, SAGIT_RESET_PIN * 0x1000u + 4),
++		    sagit_diag_read(east, SAGIT_IRQ_PIN * 0x1000u),
++		    sagit_diag_read(east, SAGIT_IRQ_PIN * 0x1000u + 4),
++		    sagit_diag_read(north, SAGIT_VDDIO_PIN * 0x1000u),
++		    sagit_diag_read(north, SAGIT_VDDIO_PIN * 0x1000u + 4));
++	} else {
++		printf("SAGIT TOUCH: TLMM map failed, skip GPIO reads\n");
++	}
++}
++#endif
+diff --git a/bsd/dev/sagit_touch_i2c.c b/bsd/dev/sagit_touch_i2c.c
+new file mode 100644
+index 0000000..79a2dc9
+--- /dev/null
++++ b/bsd/dev/sagit_touch_i2c.c
+@@ -0,0 +1,594 @@
++/*
++ * Xiaomi Mi 6 (sagit) S3330-family RMI4 raw probe and opt-in HID on GPIO87/88.
++ * Separate from the read-only GCC/GENI diagnostic and SM7150 SE7 driver.
++ * Requires both sagit/MSM8998 ADT identities AND sagittouch=1. No PMIC,
++ * GCC, SE14, reset, VDDIO or IRQ access. Only GPIO87/88 are configured.
++ * Query8 length seen in the shim is 1: F12 Data1 presence/offset is NOT
++ * established. sagittouchhid=1 treats 0x08 as an experimental candidate,
++ * never as a proven firmware layout. Default sagittouch=1 remains raw-only.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern bool sagit_touch_i2c_board(void);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++
++#define EAST_PA        0x03d00000u	/* TLMM + 0x900000 */
++#define SDA_CFG        (87u * 0x1000u)
++#define SCL_CFG        (88u * 0x1000u)
++#define IO_REG         4u
++#define SDA           SDA_CFG
++#define SCL           SCL_CFG
++#define RESET_CFG     (89u * 0x1000u)
++#define I2C_ADDR      0x20u
++#define CFG_MASK      0x3ffu
++#define IN_PULL_UP    (3u | (2u << 6))
++#define OUT_LOW       ((2u << 6) | 0x200u)
++#define MAX_READ      96u
++#define MAX_FINGERS   10u
++#define FINGER_BYTES  8u
++
++static vm_offset_t pt_gpio;
++static vm_offset_t pt_reset_gpio;
++static uint32_t saved_sda_cfg, saved_scl_cfg, saved_sda_io, saved_scl_io;
++static int pt_sleep_chan;
++static bool pt_started;
++static bool pt_hid_enabled;
++static bool pt_reset_enabled;
++static bool pt_down[MAX_FINGERS];
++static int pt_x[MAX_FINGERS], pt_y[MAX_FINGERS];
++static unsigned pt_fingers;
++
++static uint32_t
++pt_rd(uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(pt_gpio + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++pt_wr(uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(pt_gpio + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static uint32_t
++pt_reset_rd(unsigned off)
++{
++	uint32_t v = *(volatile uint32_t *)(pt_reset_gpio + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++pt_reset_wr(unsigned off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(pt_reset_gpio + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++/* Drive low by latching zero BEFORE enabling output; release to input/pull-up.
++ * Never actively drive high; preserve unrelated TLMM config bits. */
++static void
++pt_line(uint32_t cfg, bool release)
++{
++	uint32_t old = pt_rd(cfg);
++	if (!release) {
++		pt_wr(cfg + IO_REG, pt_rd(cfg + IO_REG) & ~2u);
++	}
++	pt_wr(cfg, (old & ~CFG_MASK) | (release ? IN_PULL_UP : OUT_LOW));
++}
++
++static bool
++pt_high(uint32_t cfg)
++{
++	return (pt_rd(cfg + IO_REG) & 1u) != 0;
++}
++
++static bool
++pt_clock(void)
++{
++	pt_line(SCL, true);
++	/* At most 100 us of bounded clock stretch, never assume SCL rose. */
++	for (unsigned i = 0; i < 20; ++i) {
++		if (pt_high(SCL)) {
++			delay(5);
++			return true;
++		}
++		delay(5);
++	}
++	return false;
++}
++
++static void
++pt_stop(void)
++{
++	pt_line(SDA, false);
++	delay(5);
++	(void)pt_clock();
++	pt_line(SDA, true);
++	delay(5);
++}
++
++static bool
++pt_idle(void)
++{
++	pt_line(SDA, true);
++	pt_line(SCL, true);
++	delay(20);
++	return pt_high(SDA) && pt_high(SCL);
++}
++
++static bool
++pt_start(bool repeated)
++{
++	pt_line(SDA, true);
++	if (!repeated) {
++		if (!pt_idle()) {
++			return false; /* stuck bus: do not report false ACK */
++		}
++	} else if (!pt_clock()) {
++		return false;
++	}
++	if (!pt_high(SDA) || !pt_high(SCL)) {
++		return false;
++	}
++	pt_line(SDA, false);
++	delay(5);
++	pt_line(SCL, false);
++	delay(5);
++	return true;
++}
++
++static unsigned pt_write_failure;
++
++static bool
++pt_write(uint8_t b)
++{
++	pt_write_failure = 0;
++	for (int i = 7; i >= 0; --i) {
++		pt_line(SDA, (b & (1u << i)) != 0);
++		delay(3);
++		if (!pt_clock()) {
++			pt_write_failure = 1;
++			return false;
++		}
++		pt_line(SCL, false);
++		delay(3);
++	}
++	pt_line(SDA, true);
++	delay(5);
++	if (!pt_clock()) {
++		pt_write_failure = 1;
++		return false;
++	}
++	bool ack = !pt_high(SDA);
++	pt_line(SCL, false);
++	delay(5);
++	if (!ack) pt_write_failure = 2;
++	return ack;
++}
++
++static bool
++pt_read_byte(uint8_t *out, bool ack)
++{
++	uint8_t b = 0;
++	pt_line(SDA, true);
++	for (unsigned i = 0; i < 8; ++i) {
++		if (!pt_clock()) {
++			return false;
++		}
++		b = (uint8_t)((b << 1) | (pt_high(SDA) ? 1u : 0u));
++		pt_line(SCL, false);
++		delay(3);
++	}
++	pt_line(SDA, !ack);
++	delay(3);
++	if (!pt_clock()) {
++		return false;
++	}
++	pt_line(SCL, false);
++	pt_line(SDA, true);
++	*out = b;
++	return true;
++}
++
++static unsigned pt_read_stage;
++static unsigned pt_read_failure;
++
++/* Shim-proven RMI4 protocol: write 0xff,page then STOP; address the
++ * one-byte register and repeat-start for reading. Each transfer is capped.
++ * STOP and released lines on every exit, including a failed ACK/clock. */
++static bool
++pt_read(uint16_t reg, uint8_t *buf, unsigned len)
++{
++	bool ok = false;
++	pt_read_failure = 0;
++	pt_read_stage = 1;
++	if (!len || len > MAX_READ || !pt_start(false)) goto out;
++	pt_read_stage = 2;
++	if (!pt_write(I2C_ADDR << 1)) goto out;
++	pt_read_stage = 3;
++	if (!pt_write(0xff)) goto out;
++	pt_read_stage = 4;
++	if (!pt_write((uint8_t)(reg >> 8))) goto out;
++	pt_stop();
++	pt_read_stage = 5;
++	if (!pt_start(false)) goto out;
++	pt_read_stage = 6;
++	if (!pt_write(I2C_ADDR << 1)) goto out;
++	pt_read_stage = 7;
++	if (!pt_write((uint8_t)reg)) goto out;
++	pt_read_stage = 8;
++	if (!pt_start(true)) goto out;
++	pt_read_stage = 9;
++	if (!pt_write((I2C_ADDR << 1) | 1u)) goto out;
++	for (unsigned i = 0; i < len; ++i) {
++		pt_read_stage = 10 + i;
++		if (!pt_read_byte(&buf[i], i + 1 < len)) goto out;
++	}
++	ok = true;
++out:
++	pt_read_failure = pt_write_failure;
++	pt_stop();
++	pt_read_stage = ok ? 30 : pt_read_stage;
++	if (!pt_idle()) {
++		pt_read_stage = 31;
++		return false;
++	}
++	return ok;
++}
++
++static void
++pt_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&pt_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++pt_restore(void)
++{
++	/* Always disable outputs first, then restore exactly the prior latches
++	 * and mux/configuration of the two I2C pins. No other pin is touched. */
++	pt_line(SDA, true);
++	pt_line(SCL, true);
++	pt_wr(SDA + IO_REG, saved_sda_io);
++	pt_wr(SCL + IO_REG, saved_scl_io);
++	pt_wr(SDA, saved_sda_cfg);
++	pt_wr(SCL, saved_scl_cfg);
++}
++
++/* Vendor DSX Query5 contains size-of-Query6 then Control0.. presence bits.
++ * Each present Control below 23 occupies one address for this layout. */
++static bool
++pt_f12_fingers(uint8_t query_base, uint8_t ctrl_base, unsigned *count,
++    uint8_t *report_mask)
++{
++	uint8_t q[32] = {0}, ctrl[2] = {0}, size = 0;
++	unsigned offset = 0, ctrl28_offset = 0;
++	if (!pt_read((uint16_t)(query_base + 4u), &size, 1) ||
++	    size < 4 || size > sizeof(q)) {
++		return false;
++	}
++	for (unsigned n = 0; n < size; n += MAX_READ) {
++		unsigned chunk = size - n < MAX_READ ? size - n : MAX_READ;
++		if (!pt_read((uint16_t)(query_base + 5u + n), q + n, chunk)) {
++			return false;
++		}
++	}
++	/* First Query5 byte is size-of-Query6, then Control0.. bits. */
++	if (!(q[1 + 23 / 8] & (1u << (23 % 8)))) {
++		return false;
++	}
++	for (unsigned n = 0; n < 23; ++n) {
++		offset += (q[1 + n / 8] >> (n % 8)) & 1u;
++	}
++	if (offset > 0xffu - ctrl_base ||
++	    !pt_read((uint16_t)(ctrl_base + offset), ctrl, sizeof(ctrl))) {
++		return false;
++	}
++	printf("SAGIT HID: F12 Ctrl23 at 0x%02x = %02x %02x\n",
++	    (unsigned)(ctrl_base + offset), ctrl[0], ctrl[1]);
++	if (!(ctrl[0] & 1u) || ctrl[1] < 1 || ctrl[1] > MAX_FINGERS) {
++		return false;
++	}
++	*count = ctrl[1];
++	if (q[1 + 28 / 8] & (1u << (28 % 8))) {
++		for (unsigned n = 0; n < 28; ++n) {
++			ctrl28_offset += (q[1 + n / 8] >> (n % 8)) & 1u;
++		}
++		if (ctrl28_offset <= 0xffu - ctrl_base &&
++		    pt_read((uint16_t)(ctrl_base + ctrl28_offset), report_mask, 1)) {
++			printf("SAGIT HID: F12 Ctrl28 at 0x%02x report=0x%02x\n",
++			    (unsigned)(ctrl_base + ctrl28_offset), *report_mask);
++		}
++	}
++	return true;
++}
++
++/* Experimental: 0x08 is finger-correlated and the vendor driver's
++ * zero-initialized Query8 fallback reads Data1 from the data base, but
++ * Query8 length one does not independently establish its presence. */
++static void
++pt_release(void)
++{
++	for (unsigned i = 0; i < MAX_FINGERS; ++i) {
++		if (pt_down[i]) {
++			sweet_hid_touch((int)i, 0, pt_x[i], pt_y[i]);
++			pt_down[i] = false;
++		}
++	}
++}
++
++static bool
++pt_frame(const uint8_t *b, int *x, int *y, bool *present)
++{
++	*present = false;
++	if ((b[0] & 0x0f) == 0) {
++		return true;
++	}
++	/* Vendor S3330 DSX: object status, LE x/y, z, wx, wy.
++	 * Reject unknown object types and out-of-panel coordinates. */
++	*x = (int)((unsigned)b[1] | ((unsigned)b[2] << 8));
++	*y = (int)((unsigned)b[3] | ((unsigned)b[4] << 8));
++	if ((b[0] & 0x0f) != 1 || *x >= 1080 || *y >= 1920) {
++		return false;
++	}
++	*present = true;
++	return true;
++}
++
++static void
++pt_thread(void *arg __unused, wait_result_t result __unused)
++{
++	uint8_t f01[6] = {0}, f12[6] = {0}, query[16] = {0};
++	uint8_t raw[MAX_FINGERS * FINGER_BYTES] = {0};
++	pt_gpio = ml_io_map(EAST_PA, 0x80000);
++	pt_reset_gpio = ml_io_map(EAST_PA + RESET_CFG, 0x1000);
++	if (!pt_gpio || !pt_reset_gpio) {
++		printf("SAGIT I2C: TLMM east map failed\n");
++		goto done;
++	}
++	saved_sda_cfg = pt_rd(SDA);
++	saved_scl_cfg = pt_rd(SCL);
++	saved_sda_io = pt_rd(SDA + IO_REG);
++	saved_scl_io = pt_rd(SCL + IO_REG);
++	printf("SAGIT I2C: RESET89 before cfg=0x%x io=0x%x\n",
++	    pt_reset_rd(0), pt_reset_rd(IO_REG));
++	if (pt_reset_enabled) {
++		uint32_t cfg = pt_reset_rd(0);
++		uint32_t io = pt_reset_rd(IO_REG);
++		/*
++		 * Mi 6's LK usually leaves the touch out of reset (the panel is on
++		 * for the boot logo), unlike the MIX 2S test unit that held it low.
++		 * Release only if it is still asserted as a GPIO output; otherwise
++		 * continue with the bus as the bootloader left it. No low pulse,
++		 * no VDDIO50 or PMIC change.
++		 */
++		if ((cfg & CFG_MASK) == 0x201u && !(io & 2u)) {
++			pt_reset_wr(IO_REG, io | 2u);
++			pt_wait(200);
++			printf("SAGIT I2C: RESET89 released cfg=0x%x io=0x%x\n",
++			    pt_reset_rd(0), pt_reset_rd(IO_REG));
++			if (!(pt_reset_rd(IO_REG) & 1u)) {
++				printf("SAGIT I2C: RESET89 pad did not rise; continuing to bus check\n");
++			}
++		} else {
++			printf("SAGIT I2C: RESET89 already released (cfg=0x%x io=0x%x); no pulse\n",
++			    cfg, io);
++		}
++	}
++	/* Require a verified released bus after configuring GPIO87/88 open drain. */
++	if (!pt_idle()) {
++		printf("SAGIT I2C: bus stuck; no RMI4 transactions\n");
++		goto restore;
++	}
++	if (!pt_read(0x00e3, f01, sizeof(f01))) {
++		printf("SAGIT I2C: F01 PDT read failed stage=%u reason=%u (1=SCL,2=NACK) lines=%u%u\n",
++		    pt_read_stage, pt_read_failure, pt_high(SDA), pt_high(SCL));
++		goto restore;
++	}
++	printf("SAGIT I2C: F01 PDT %02x %02x %02x %02x %02x %02x\n",
++	    f01[0], f01[1], f01[2], f01[3], f01[4], f01[5]);
++	/*
++	 * Mi 6 shipped with three touch variants (S3330/S3331 JDI, TD4322 LGD).
++	 * All are RMI4 and expose F01/F12, but the descriptor tail differs between
++	 * firmware builds, so only the stable identity bytes are required here.
++	 */
++	if (f01[0] != 0x2c || f01[1] != 0x23 || f01[5] != 0x01) {
++		printf("SAGIT I2C: F01 PDT identity mismatch; HID withheld\n");
++		goto restore;
++	}
++	if (!pt_read(0x00dd, f12, sizeof(f12))) {
++		printf("SAGIT I2C: F12 PDT read failed stage=%u reason=%u lines=%u%u\n",
++		    pt_read_stage, pt_read_failure, pt_high(SDA), pt_high(SCL));
++		goto restore;
++	}
++	printf("SAGIT I2C: F12 PDT %02x %02x %02x %02x %02x %02x\n",
++	    f12[0], f12[1], f12[2], f12[3], f12[4], f12[5]);
++	if (f12[0] != 0x49 || f12[2] < 0x04) {
++		printf("SAGIT I2C: F12 PDT identity mismatch; HID withheld\n");
++		goto restore;
++	}
++	printf("SAGIT I2C: PDT F01 %02x %02x %02x %02x %02x %02x F12 %02x %02x %02x %02x %02x %02x\n",
++	    f01[0], f01[1], f01[2], f01[3], f01[4], f01[5],
++	    f12[0], f12[1], f12[2], f12[3], f12[4], f12[5]);
++	uint8_t f01_status[2] = {0}, f01_ctrl = 0;
++	if (!pt_read(f01[3], f01_status, sizeof(f01_status)) ||
++	    !pt_read(f01[2], &f01_ctrl, 1)) {
++		printf("SAGIT I2C: F01 status/control read failed stage=%u reason=%u\n",
++		    pt_read_stage, pt_read_failure);
++		goto restore;
++	}
++	printf("SAGIT I2C: F01 device=0x%02x irq=0x%02x control=0x%02x (configured=%u)\n",
++	    f01_status[0], f01_status[1], f01_ctrl, (f01_ctrl >> 7) & 1u);
++	if (!pt_read(f12[0], query, sizeof(query))) {
++		printf("SAGIT I2C: F12 raw query read failed\n");
++		goto restore;
++	}
++	printf("SAGIT I2C: F12 query+0..15 %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x; Query8 length=%u; HID layout UNPROVEN\n",
++	    query[0], query[1], query[2], query[3], query[4], query[5], query[6], query[7],
++	    query[8], query[9], query[10], query[11], query[12], query[13], query[14], query[15], query[7]);
++	/*
++	 * Query8 length lives in query[7]. The earlier non-sagit build required an
++	 * exact 8-byte signature from its firmware; Mi 6 units run different
++	 * Synaptics firmware, so only a sane Query8 length is required and the
++	 * full page is logged for diagnosis.
++	 */
++	if (pt_hid_enabled && (query[7] == 0 || query[7] > 8)) {
++		printf("SAGIT HID: implausible F12 query signature; refusing HID\n");
++		goto restore;
++	}
++	if (pt_hid_enabled) {
++		pt_fingers = 1; /* shim-observed single slot only */
++		unsigned reported = 0;
++		uint8_t report_mask = 0;
++		if (pt_f12_fingers(f12[0], f12[2], &reported, &report_mask)) {
++			if (report_mask == 0xffu) {
++				pt_fingers = reported;
++				printf("SAGIT HID: Ctrl23 confirmed %u slots, 8-byte report\n", pt_fingers);
++			} else {
++				printf("SAGIT HID: Ctrl28 is not 8-byte report; refusing HID\n");
++				goto restore;
++			}
++		} else {
++			printf("SAGIT HID: Ctrl23 unverified; one experimental slot only\n");
++		}
++	}
++	if (pt_hid_enabled) {
++		unsigned failures = 0;
++		bool logged_bad_frame = false;
++		unsigned candidates[MAX_FINGERS] = {0};
++		int prior_x[MAX_FINGERS] = {0}, prior_y[MAX_FINGERS] = {0};
++		printf("SAGIT HID: experimental F12 base 0x%02x, %u slots, 8 bytes each\n",
++		    f12[3], pt_fingers);
++		for (;;) {
++			bool valid = true, present[MAX_FINGERS] = {0};
++			int x[MAX_FINGERS] = {0}, y[MAX_FINGERS] = {0};
++			bool read_ok = pt_read(f12[3], raw, pt_fingers * FINGER_BYTES);
++			unsigned bad_slot = MAX_FINGERS;
++			if (read_ok) {
++				for (unsigned slot = 0; slot < pt_fingers; ++slot) {
++					if (!pt_frame(raw + slot * FINGER_BYTES,
++					    &x[slot], &y[slot], &present[slot])) {
++						valid = false;
++						bad_slot = slot;
++						break;
++					}
++				}
++			} else {
++				valid = false;
++			}
++			if (!valid && !logged_bad_frame) {
++				printf("SAGIT HID: first invalid frame read=%u stage=%u reason=%u slot=%u first=%02x %02x %02x %02x %02x %02x %02x %02x\n",
++				    read_ok, pt_read_stage, pt_read_failure, bad_slot,
++				    raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
++				logged_bad_frame = true;
++			}
++			if (!valid) {
++				pt_release();
++				for (unsigned slot = 0; slot < pt_fingers; ++slot) candidates[slot] = 0;
++				if (++failures >= 8) {
++					printf("SAGIT HID: repeated read/invalid frames, stopping\n");
++					break;
++				}
++				pt_wait(20);
++				continue;
++			}
++			failures = 0;
++			for (unsigned slot = 0; slot < pt_fingers; ++slot) {
++				if (!present[slot]) {
++					if (pt_down[slot]) {
++						sweet_hid_touch((int)slot, 0, pt_x[slot], pt_y[slot]);
++						pt_down[slot] = false;
++					}
++					candidates[slot] = 0;
++					continue;
++				}
++				if (!pt_down[slot]) {
++					if (candidates[slot] && x[slot] - prior_x[slot] < 80 &&
++					    prior_x[slot] - x[slot] < 80 && y[slot] - prior_y[slot] < 80 &&
++					    prior_y[slot] - y[slot] < 80) {
++						sweet_hid_touch((int)slot, 1, x[slot], y[slot]);
++						pt_down[slot] = true;
++						pt_x[slot] = x[slot]; pt_y[slot] = y[slot];
++						candidates[slot] = 0;
++					} else {
++						candidates[slot] = 1;
++					}
++					prior_x[slot] = x[slot]; prior_y[slot] = y[slot];
++				} else if (x[slot] - pt_x[slot] >= 200 || pt_x[slot] - x[slot] >= 200 ||
++				    y[slot] - pt_y[slot] >= 200 || pt_y[slot] - y[slot] >= 200) {
++					sweet_hid_touch((int)slot, 0, pt_x[slot], pt_y[slot]);
++					pt_down[slot] = false;
++					candidates[slot] = 0;
++				} else if (x[slot] != pt_x[slot] || y[slot] != pt_y[slot]) {
++					sweet_hid_touch((int)slot, 1, x[slot], y[slot]);
++					pt_x[slot] = x[slot]; pt_y[slot] = y[slot];
++				}
++			}
++			pt_wait(20);
++		}
++	} else {
++		for (unsigned i = 0; i < 4; ++i) {
++			if (!pt_read(f12[3], raw, FINGER_BYTES)) {
++				printf("SAGIT I2C: raw sample %u failed; stopping\n", i);
++				goto restore;
++			}
++			printf("SAGIT I2C: raw 0x%02x sample %u: %02x %02x %02x %02x %02x %02x %02x %02x (NOT contacts)\n",
++			    f12[3], i, raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
++			pt_wait(250);
++		}
++	}
++
++restore:
++	pt_release();
++	pt_restore();
++	printf("SAGIT I2C: stopped, GPIO87/88 restored\n");
++done:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sagit_touch_i2c_init(void)
++{
++	int enabled = 0, hid_enabled = 0, reset_enabled = 0;
++	thread_t thread;
++	if (!sagit_touch_i2c_board()) {
++		return;
++	}
++	(void)PE_parse_boot_argn("sagittouch", &enabled, sizeof(enabled));
++	(void)PE_parse_boot_argn("sagittouchhid", &hid_enabled, sizeof(hid_enabled));
++	(void)PE_parse_boot_argn("sagittouchreset", &reset_enabled, sizeof(reset_enabled));
++	if ((enabled != 1 && hid_enabled != 1) || pt_started) {
++		return;
++	}
++	pt_started = true;
++	pt_hid_enabled = hid_enabled == 1;
++	pt_reset_enabled = reset_enabled == 1;
++	printf("SAGIT I2C: opted in; GPIO87/88 raw/PDT prototype; HID %s RESET89 %s\n",
++	    pt_hid_enabled ? "EXPERIMENTAL" : "off", pt_reset_enabled ? "release" : "unchanged");
++	kern_return_t kr = kernel_thread_start(pt_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SAGIT I2C: thread start failed %d\n", kr);
++	}
++}
++#endif
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index a148608..10f5033 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -12,6 +12,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++extern bool sweet_touch_board(void);
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+@@ -127,6 +128,10 @@ sweet_keys_init(void)
+ {
+ 	int enabled = 1;
+ 	thread_t thread;
++	if (!sweet_touch_board()) {
++		printf("SWEET KEYS: SM7150 not confirmed; PMIC driver prohibited\n");
++		return;
++	}
+ 	if (keys_started) {
+ 		return;
+ 	}
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 03defe6..f59e189 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -14,6 +14,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++extern bool sweet_touch_board(void);
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -640,6 +641,10 @@ sweet_touch_init(void)
+ {
+ 	int enabled = 1;
+ 	thread_t thread;
++	if (!sweet_touch_board()) {
++		printf("SWEET TOUCH: SM7150 not confirmed; SE7/L11C driver prohibited\n");
++		return;
++	}
+ 	if (st.started) {
+ 		return;
+ 	}
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 6b926fe..a175df0 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -52,6 +52,8 @@ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
++extern void sagit_touch_diag(void);
++extern void sagit_touch_i2c_init(void);
+ extern void sweet_usb_probe(void);
+ 
+ #define REG_CAP         0x00
+@@ -659,6 +661,8 @@ sweet_ufs_init(void)
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
+ 	sweet_touch_init();
++	sagit_touch_diag();
++	sagit_touch_i2c_init();
+ 	sweet_usb_probe();
+ 	return 0;
+ }
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 68612db..fad349c 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -192,11 +192,15 @@ static TUNABLE(bool, bootarg_execfailurereports, "execfailurecrashes", false);
+ static TUNABLE(bool, bootarg_arm64e_preview_abi, "-arm64e_preview_abi", false);
+ #endif /* __has_feature(ptrauth_calls) */
+ 
+-#if DEBUG || DEVELOPMENT
++#if DEBUG || DEVELOPMENT || defined(ARM64_BOARD_CONFIG_SWEET)
+ static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", false);
+ #endif /* DEBUG || DEVELOPMENT */
+ #endif /* XNU_TARGET_OS_OSX */
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern bool sagit_touch_board(void);
++#endif
++
+ #if CONFIG_DTRACE
+ /* Do not include dtrace.h, it redefines kmem_[alloc/free] */
+ extern void dtrace_proc_exec(proc_t);
+@@ -7392,13 +7396,18 @@ process_signature(proc_t p, struct image_params *imgp)
+ 		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
+ 		if (psa == NULL || psa->psa_platform == 0) {
+ 			boolean_t no_sandbox_entitled = FALSE;
+-#if DEBUG || DEVELOPMENT
++#if DEBUG || DEVELOPMENT || defined(ARM64_BOARD_CONFIG_SWEET)
+ 			/*
+ 			 * Allow iOS binaries to spawn on internal systems
+ 			 * if no-sandbox entitlement is present of unentitled_ios_sim_launch
+ 			 * boot-arg set to true
+ 			 */
++			/* RELEASE exception requires an explicit boot arg and sagit ADT. */
++#if DEBUG || DEVELOPMENT
+ 			if (unentitled_ios_sim_launch) {
++#else
++			if (unentitled_ios_sim_launch && sagit_touch_board()) {
++#endif
+ 				no_sandbox_entitled = TRUE;
+ 			} else {
+ 				no_sandbox_entitled = IOVnodeHasEntitlement(imgp->ip_vp,
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..24ca076 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -103,7 +103,9 @@ public:
+ 	uint64_t      fPhys;
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+-	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++	int32_t       fOffX, fOffY;             /* panel origin of the logical display */
++	uint32_t      fContentW, fContentH;     /* panel area the logical display fills */
++	int           fScale;                   /* scale the logical display into the panel */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -167,15 +169,33 @@ AppleCLCD::start(IOService *provider)
+ 		return false;
+ 	}
+ 	int native = 0;
++	int sagit = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	PE_parse_boot_argn("sweetfb_sagit", &sagit, sizeof(sagit));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
++	fContentW = fWidth;
++	fContentH = fHeight;
++	fScale = 0;
+ 	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	if (!native && sagit) {
++		/*
++		 * sagit is 1080x1920 (16:9). Fit the whole iPhone X logical
++		 * display by height (886x1920) instead of cropping it, with
++		 * black 97-pixel bars on the sides.
++		 */
++		fContentW = (fLogicalW * fHeight + fLogicalH / 2) / fLogicalH;
++		fContentH = fHeight;
++		fOffX = (int32_t)(fWidth - fContentW) / 2;
++		fOffY = 0;
++		fScale = 1;
++	} else {
++		fOffX = (int32_t)(fLogicalW - fWidth) / 2;
++		fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -187,6 +207,12 @@ AppleCLCD::start(IOService *provider)
+ 		OSSafeReleaseNULL(fWorkLoop);
+ 		return false;
+ 	}
++	if (fScale) {
++		/* Hide the boot splash behind the side bars before the first swap. */
++		for (uint32_t y = 0; y < fHeight; y++) {
++			memset((void *)(fPixels + (uint64_t)y * fRowBytes), 0, (size_t)fWidth * 4);
++		}
++	}
+ 	fVsync = IOTimerEventSource::timerEventSource(this, &AppleCLCD::vsyncFired);
+ 	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
+ 		IOLog("SWEET FB: no vsync timer\n");
+@@ -203,6 +229,8 @@ AppleCLCD::start(IOService *provider)
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	IOLog("SWEET FB: %s %ux%u content at %d,%d\n", fScale ? "scaling to" : "cropping at",
++	    fContentW, fContentH, fOffX, fOffY);
+ 	return true;
+ }
+ 
+@@ -356,21 +384,41 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (sx < 0 || sy < 0) {
+ 			sx = sy = 0;
+ 		}
+-		if (dx < 0 || dy < 0) {
+-			dx = dy = 0;
+-		}
+-		/* Logical (presented) display coordinates -> panel coordinates. */
+-		dx -= fOffX;
+-		dy -= fOffY;
+-		if (dx < 0) {
+-			sx -= dx;
+-			w += dx;
+-			dx = 0;
+-		}
+-		if (dy < 0) {
+-			sy -= dy;
+-			h += dy;
+-			dy = 0;
++		if (fScale) {
++			/* The swap rectangles are already in logical display pixels. */
++			if (dx < 0) {
++				sx -= dx;
++				w += dx;
++				dx = 0;
++			}
++			if (dy < 0) {
++				sy -= dy;
++				h += dy;
++				dy = 0;
++			}
++			if (dx + w > (int32_t)fLogicalW) {
++				w = (int32_t)fLogicalW - dx;
++			}
++			if (dy + h > (int32_t)fLogicalH) {
++				h = (int32_t)fLogicalH - dy;
++			}
++		} else {
++			if (dx < 0 || dy < 0) {
++				dx = dy = 0;
++			}
++			/* Logical (presented) display coordinates -> panel coordinates. */
++			dx -= fOffX;
++			dy -= fOffY;
++			if (dx < 0) {
++				sx -= dx;
++				w += dx;
++				dx = 0;
++			}
++			if (dy < 0) {
++				sy -= dy;
++				h += dy;
++				dy = 0;
++			}
+ 		}
+ 		if (w > (int32_t)s->width - sx) {
+ 			w = (int32_t)s->width - sx;
+@@ -378,11 +426,13 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (h > (int32_t)s->height - sy) {
+ 			h = (int32_t)s->height - sy;
+ 		}
+-		if (w > (int32_t)fWidth - dx) {
+-			w = (int32_t)fWidth - dx;
+-		}
+-		if (h > (int32_t)fHeight - dy) {
+-			h = (int32_t)fHeight - dy;
++		if (!fScale) {
++			if (w > (int32_t)fWidth - dx) {
++				w = (int32_t)fWidth - dx;
++			}
++			if (h > (int32_t)fHeight - dy) {
++				h = (int32_t)fHeight - dy;
++			}
+ 		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+ 		    (uint64_t)(sx + w) * 4;
+@@ -390,7 +440,45 @@ AppleCLCD::present(const uint8_t *rec)
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+ 			src = 0;
+ 		}
+-		if (src != 0 && bpe == 4) {
++		if (src != 0 && bpe == 4 && fScale) {
++			/* Scale the logical rectangle into the panel content area. */
++			int32_t px0 = fOffX + (int32_t)(((int64_t)dx * fContentW) / fLogicalW);
++			int32_t py0 = fOffY + (int32_t)(((int64_t)dy * fContentH) / fLogicalH);
++			int32_t px1 = fOffX + (int32_t)(((int64_t)(dx + w) * fContentW) / fLogicalW);
++			int32_t py1 = fOffY + (int32_t)(((int64_t)(dy + h) * fContentH) / fLogicalH);
++			if (px0 < 0) {
++				px0 = 0;
++			}
++			if (py0 < 0) {
++				py0 = 0;
++			}
++			if (px1 > (int32_t)fWidth) {
++				px1 = (int32_t)fWidth;
++			}
++			if (py1 > (int32_t)fHeight) {
++				py1 = (int32_t)fHeight;
++			}
++			uint64_t xstep = ((uint64_t)fLogicalW << 16) / fContentW;
++			for (int32_t y = py0; y < py1; y++) {
++				int32_t ly = (int32_t)(((int64_t)(y - fOffY) * fLogicalH) / fContentH);
++				int32_t syy = sy + ly - dy;
++				if (syy < sy || syy >= sy + h) {
++					continue;
++				}
++				uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++				const uint32_t *srow = (const uint32_t *)(src + s->offset +
++				    (uint64_t)syy * s->bytesPerRow);
++				uint64_t xpos = (uint64_t)(px0 - fOffX) * xstep;
++				for (int32_t x = px0; x < px1; x++) {
++					int32_t lx = (int32_t)(xpos >> 16);
++					xpos += xstep;
++					if (lx < dx || lx >= dx + w) {
++						continue;
++					}
++					drow[x] = srow[sx + lx - dx];
++				}
++			}
++		} else if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..81a86f9 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -368,6 +368,7 @@ protected:
+ private:
+ 	IOLock *fLock;
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
++	int fPanelW, fPanelH, fContentW, fContentH, fScale;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -433,11 +434,28 @@ SweetHIDTouch::start(IOService *provider)
+ 		return false;
+ 	}
+ 	int native = 0;
++	int sagit = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	PE_parse_boot_argn("sweetfb_sagit", &sagit, sizeof(sagit));
+ 	fLogicalW = native ? 1080 : 1125;
+ 	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	fPanelW = 1080;
++	fPanelH = 2400;
++	fScale = 0;
++	if (!native && sagit) {
++		/* sagit 1080x1920: the logical display is scaled by height. */
++		fPanelH = 1920;
++		fContentW = (fLogicalW * fPanelH + fLogicalH / 2) / fLogicalH;
++		fContentH = fPanelH;
++		fOffX = (fPanelW - fContentW) / 2;
++		fOffY = 0;
++		fScale = 1;
++	} else {
++		fContentW = fPanelW;
++		fContentH = fPanelH;
++		fOffX = (fLogicalW - fPanelW) / 2;
++		fOffY = (fLogicalH - fPanelH) / 2;
++	}
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+@@ -458,22 +476,32 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x > fPanelW - 1 ? fPanelW - 1 : x);
++	y = y < 0 ? 0 : (y > fPanelH - 1 ? fPanelH - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+ 	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	int64_t lx, ly;
++	if (fScale) {
++		lx = ((int64_t)(x - fOffX) * fLogicalW + fContentW / 2) / fContentW;
++		ly = ((int64_t)(y - fOffY) * fLogicalH + fContentH / 2) / fContentH;
++		lx = lx < 0 ? 0 : (lx > fLogicalW - 1 ? fLogicalW - 1 : lx);
++		ly = ly < 0 ? 0 : (ly > fLogicalH - 1 ? fLogicalH - 1 : ly);
++	} else {
++		lx = x + fOffX;
++		ly = y + fOffY;
++	}
++	IOFixed nx = (IOFixed)((lx << 16) / fLogicalW);
++	IOFixed ny = (IOFixed)((ly << 16) / fLogicalH);
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > fPanelW - 1 - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > fPanelH - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 42362c5..ddae366 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -347,6 +347,7 @@ arm_init(
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	sweet_early_init(args);
+ 	sweet_early_mark(1, "arm_init entered (MMU on)");
+ 
+ 	arm_setup_pre_sign();
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 06bb568..2e3e441 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1833,17 +1833,25 @@ init_ptpages(tt_entry_t *tt, vm_map_address_t start, vm_map_address_t end, bool
+  */
+ #define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
+ 
++static vm_map_address_t sweet_early_fb_va = SWEET_EARLY_FB_VA;
++
+ static void
+-sweet_early_map_final(void)
++sweet_early_map_final(boot_args *args)
+ {
+ 	const vm_map_address_t va = SWEET_EARLY_FB_VA;
++	uint64_t fb = 0x9c000000ULL;
++	if (args != NULL && args->Video.v_baseAddr != 0) {
++		fb = args->Video.v_baseAddr;
++	}
++	uint64_t block = fb & ~((uint64_t)ARM_TT_L2_SIZE - 1);
++	sweet_early_fb_va = va + (vm_map_address_t)(fb - block);
+ 	assert(va + ARM_TT_L2_SIZE <= gVirtBase);
+ 	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
+ 	assert((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) == (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE));
+ 	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+ 	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
+ 	assert(*slot == ARM_TTE_EMPTY);
+-	*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++	*slot = block | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
+ 	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+ 	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
+@@ -2181,7 +2189,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ #if defined(SWEET)
+ 	/* phystokv() must still refer to the bootstrap aperture here. */
+-	sweet_early_map_final();
++	sweet_early_map_final(args);
+ #endif
+ 	arm_vm_physmap_init(args);
+ 	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+@@ -2190,7 +2198,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ #if defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+-	sweet_early_relocate(SWEET_EARLY_FB_VA);
++	sweet_early_relocate(sweet_early_fb_va);
+ #endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ 
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 023086f..206d448 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -514,21 +514,33 @@ LEXT(start_first_cpu)
+ 	mov		x21, #0
+ 
+ #if defined(SWEET)
+-	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	/*
++	 * Stage 0: white 64x32 band at the bottom-left of the panel, no stack
++	 * or page tables needed. boot_args (saved in x20) carries the board's
++	 * real framebuffer base and geometry.
++	 */
++	ldr		x0, [x20, #40]			/* Video.v_baseAddr */
++	cbz		x0, Lsweet_mark_done
++	ldr		x4, [x20, #56]			/* Video.v_rowBytes */
++	cbz		x4, Lsweet_mark_done
++	ldr		x2, [x20, #72]			/* Video.v_height */
++	cmp		x2, #32
++	b.lo		Lsweet_mark_done
++	sub		x2, x2, #32
++	madd		x0, x2, x4, x0
+ 	mov		w1, #-1
+ 	mov		x2, #32
+-	mov		x4, #4320
+ Lsweet_mark_row:
+ 	mov		x3, #64
+ 	mov		x5, x0
+ Lsweet_mark_pixel:
+ 	str		w1, [x5], #4
+ 	subs	x3, x3, #1
+-	b.ne	Lsweet_mark_pixel
++	b.ne		Lsweet_mark_pixel
+ 	add		x0, x0, x4
+ 	subs	x2, x2, #1
+-	b.ne	Lsweet_mark_row
++	b.ne		Lsweet_mark_row
++Lsweet_mark_done:
+ 	dsb		sy
+ #endif
+ 
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 6928957..33cdf42 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -12,10 +12,11 @@
+ #include <kern/misc_protos.h>
+ 
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
++static unsigned int early_width = 1080, early_height = 2400, early_stride = 1080;
+ #define EARLY_FB early_fb
+-#define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
+-#define EARLY_STRIDE (4320u / 4)
++#define EARLY_WIDTH early_width
++#define EARLY_HEIGHT early_height
++#define EARLY_STRIDE early_stride
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+ #define EARLY_CELL_H (16u * EARLY_SCALE)
+@@ -28,6 +29,25 @@ extern unsigned char iso_font[256 * 16];
+ static unsigned int early_row, early_col;
+ static unsigned int early_started, early_disabled, early_panicking;
+ 
++/*
++ * The board's splash framebuffer is not at a fixed address (sweet:
++ * 0x9c000000, sagit: 0x9d600000), so start with the geometry the shim
++ * passed in boot_args. Called before the first marker.
++ */
++void
++sweet_early_init(const boot_args *args)
++{
++	if (args != NULL && args->Video.v_baseAddr != 0) {
++		early_fb = (volatile uint32_t *)(uintptr_t)args->Video.v_baseAddr;
++	}
++	if (args != NULL && args->Video.v_width != 0 && args->Video.v_height != 0 &&
++	    args->Video.v_rowBytes >= args->Video.v_width * 4) {
++		early_width = (unsigned int)args->Video.v_width;
++		early_height = (unsigned int)args->Video.v_height;
++		early_stride = (unsigned int)(args->Video.v_rowBytes / 4);
++	}
++}
++
+ static void
+ sweet_early_clear_row(void)
+ {
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..acda2fb 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -3,16 +3,22 @@
+ #define _ARM64_SWEET_EARLY_H_
+ 
+ #include <pexpert/arm64/board_config.h>
++#include <pexpert/arm64/boot.h>
+ #include <stdarg.h>
+ #include <stdint.h>
+ 
+ #if defined(SWEET)
++void sweet_early_init(const boot_args *args);
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
+ #else
++static inline void sweet_early_init(const boot_args *args)
++{
++	(void)args;
++}
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+ 	(void)stage;
