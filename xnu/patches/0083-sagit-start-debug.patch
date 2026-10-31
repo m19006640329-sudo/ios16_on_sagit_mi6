@@ -1,14 +1,15 @@
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 206d448..ea0ecdc 100644
+index 206d448..1f35bb2 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -844,6 +844,51 @@ common_start:
+@@ -844,6 +844,45 @@ common_start:
  	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
  #endif /* HAS_APPLE_PAC */
  
-+	/* sagit debug: L1[0] (low/mid/high) and L2 entry as color bands */
++	/* sagit debug: L1[0] low/mid/high and TTBR0>>16 as bands */
 +	mrs	x7, TTBR0_EL1
-+	bic	x7, x7, #0x3fff
++	lsr	x7, x7, #14
++	lsl	x7, x7, #14
 +	ldr	x8, [x7]
 +	movz	x1, #0x9d60, lsl #16
 +	movz	x2, #0x10e0
@@ -18,38 +19,31 @@ index 206d448..ea0ecdc 100644
 +	and	w0, w8, #0xffffff
 +	orr	w0, w0, #0xff000000
 +	add	x4, x1, x9
-+LsagitA:	str	w0, [x1], #4
++1:	str	w0, [x1], #4
 +	cmp	x1, x4
-+	b.lo	LsagitAb
++	b.lo	1b
 +	lsr	x0, x8, #24
 +	and	w0, w0, #0xffffff
 +	orr	w0, w0, #0xff000000
 +	add	x4, x4, x9
-+LsagitB:	str	w0, [x1], #4
++2:	str	w0, [x1], #4
 +	cmp	x1, x4
-+	b.lo	LsagitBb
++	b.lo	2b
 +	lsr	x0, x8, #48
 +	and	w0, w0, #0xffff
 +	orr	w0, w0, #0xff000000
 +	add	x4, x4, x9
-+LsagitC:	str	w0, [x1], #4
++3:	str	w0, [x1], #4
 +	cmp	x1, x4
-+	b.lo	LsagitCb
-+	tst	x8, #3
-+	b.ne	LsagitEf
-+	bic	x10, x8, #0x3fff
-+	adr	x11, .
-+	lsr	x11, x11, #25
-+	and	x11, x11, #0x7ff
-+	add	x10, x10, x11, lsl #3
-+	ldr	x0, [x10]
++	b.lo	3b
++	mrs	x0, TTBR0_EL1
++	lsr	x0, x0, #16
 +	and	w0, w0, #0xffffff
 +	orr	w0, w0, #0xff000000
 +	add	x4, x4, x9
-+LsagitD:	str	w0, [x1], #4
++4:	str	w0, [x1], #4
 +	cmp	x1, x4
-+	b.lo	LsagitDb
-+LsagitE:
++	b.lo	4b
 +
  	// Enable caches, MMU, ROP and JOP
  	MOV64   x0, SCTLR_EL1_DEFAULT
