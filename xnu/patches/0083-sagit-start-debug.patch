@@ -1,49 +1,39 @@
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 206d448..1f35bb2 100644
+index 206d448..21236b6 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -844,6 +844,45 @@ common_start:
+@@ -844,6 +844,35 @@ common_start:
  	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
  #endif /* HAS_APPLE_PAC */
  
-+	/* sagit debug: L1[0] low/mid/high and TTBR0>>16 as bands */
-+	mrs	x7, TTBR0_EL1
-+	lsr	x7, x7, #14
-+	lsl	x7, x7, #14
-+	ldr	x8, [x7]
-+	movz	x1, #0x9d60, lsl #16
-+	movz	x2, #0x10e0
-+	movz	x3, #0x780
-+	lsr	x3, x3, #2
-+	mul	x9, x3, x2
-+	and	w0, w8, #0xffffff
-+	orr	w0, w0, #0xff000000
-+	add	x4, x1, x9
-+1:	str	w0, [x1], #4
-+	cmp	x1, x4
-+	b.lo	1b
-+	lsr	x0, x8, #24
-+	and	w0, w0, #0xffffff
-+	orr	w0, w0, #0xff000000
-+	add	x4, x4, x9
-+2:	str	w0, [x1], #4
-+	cmp	x1, x4
-+	b.lo	2b
-+	lsr	x0, x8, #48
-+	and	w0, w0, #0xffff
-+	orr	w0, w0, #0xff000000
-+	add	x4, x4, x9
-+3:	str	w0, [x1], #4
-+	cmp	x1, x4
-+	b.lo	3b
-+	mrs	x0, TTBR0_EL1
-+	lsr	x0, x0, #16
-+	and	w0, w0, #0xffffff
-+	orr	w0, w0, #0xff000000
-+	add	x4, x4, x9
-+4:	str	w0, [x1], #4
-+	cmp	x1, x4
-+	b.lo	4b
++	/* sagit debug: stash page-table state at 0x9d500000 for TWRP dump */
++	movz	x0, #0x9d50, lsl #16
++	movz	x1, #0x4153
++	movk	x1, #0x4947, lsl #16
++	movk	x1, #0x4454, lsl #32
++	movk	x1, #0x4742, lsl #48
++	str	x1, [x0]
++	mrs	x2, TTBR0_EL1
++	str	x2, [x0, #8]
++	mrs	x2, TCR_EL1
++	str	x2, [x0, #16]
++	mrs	x2, TTBR0_EL1
++	lsr	x2, x2, #14
++	lsl	x2, x2, #14
++	ldr	x3, [x2]
++	str	x3, [x0, #24]
++	add	x4, x2, #0x400
++	ldr	x5, [x4]
++	str	x5, [x0, #32]
++	and	x6, x3, #3
++	cbnz	x6, 1f
++	lsr	x4, x3, #14
++	lsl	x4, x4, #14
++	add	x4, x4, #0x400
++	ldr	x5, [x4]
++	str	x5, [x0, #40]
++1:
++	dsb	sy
 +
  	// Enable caches, MMU, ROP and JOP
  	MOV64   x0, SCTLR_EL1_DEFAULT
