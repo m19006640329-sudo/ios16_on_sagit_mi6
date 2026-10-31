@@ -1,39 +1,67 @@
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 206d448..21236b6 100644
+index 206d448..d78e4e2 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -844,6 +844,35 @@ common_start:
+@@ -844,6 +844,63 @@ common_start:
  	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
  #endif /* HAS_APPLE_PAC */
  
-+	/* sagit debug: stash page-table state at 0x9d500000 for TWRP dump */
-+	movz	x0, #0x9d50, lsl #16
-+	movz	x1, #0x4153
-+	movk	x1, #0x4947, lsl #16
-+	movk	x1, #0x4454, lsl #32
-+	movk	x1, #0x4742, lsl #48
-+	str	x1, [x0]
-+	mrs	x2, TTBR0_EL1
-+	str	x2, [x0, #8]
-+	mrs	x2, TCR_EL1
-+	str	x2, [x0, #16]
-+	mrs	x2, TTBR0_EL1
-+	lsr	x2, x2, #14
-+	lsl	x2, x2, #14
-+	ldr	x3, [x2]
-+	str	x3, [x0, #24]
-+	add	x4, x2, #0x400
-+	ldr	x5, [x4]
-+	str	x5, [x0, #32]
-+	and	x6, x3, #3
-+	cbnz	x6, 1f
-+	lsr	x4, x3, #14
-+	lsl	x4, x4, #14
-+	add	x4, x4, #0x400
-+	ldr	x5, [x4]
-+	str	x5, [x0, #40]
-+1:
-+	dsb	sy
++	/* sagit debug: 120px grid + 16 nibble bars of L1[0] */
++	mrs	x7, TTBR0_EL1
++	lsr	x7, x7, #14
++	lsl	x7, x7, #14
++	ldr	x8, [x7]
++	movz	x14, #0x9d60, lsl #16
++	movz	x15, #0x10e0
++	mov	x9, #0
++LsagitGrid:
++	movz	x11, #0x78
++	mul	x10, x9, x11
++	mul	x10, x10, x15
++	add	x0, x14, x10
++	movz	w1, #0x00ff
++	movk	w1, #0xff00, lsl #16
++	mov	x2, #270
++LsagitGpx:
++	str	w1, [x0], #4
++	subs	x2, x2, #1
++	b.ne	LsagitGpx
++	add	x9, x9, #1
++	cmp	x9, #17
++	b.lo	LsagitGrid
++	mov	x9, #0
++LsagitBar:
++	mov	x11, #60
++	sub	x11, x11, x9, lsl #2
++	lsr	x10, x8, x11
++	and	x10, x10, #0xf
++	add	x2, x10, #1
++	movz	x12, #0x78
++	mul	x2, x2, x12
++	lsl	x13, x9, #8
++	add	x0, x14, x13
++	add	x0, x0, #240
++	movz	w1, #0xffff
++	movk	w1, #0xffff, lsl #16
++	movz	x3, #0x10e0
++	mov	x4, #12
++	bl	LsagitFill
++	add	x9, x9, #1
++	cmp	x9, #16
++	b.lo	LsagitBar
++	b	LsagitDone
++LsagitFill:
++	mov	x6, x0
++	mov	x5, x4
++LsagitPx:
++	str	w1, [x6], #4
++	subs	x5, x5, #1
++	b.ne	LsagitPx
++	add	x0, x0, x3
++	subs	x2, x2, #1
++	b.ne	LsagitFill
++	ret
++LsagitDone:
 +
  	// Enable caches, MMU, ROP and JOP
  	MOV64   x0, SCTLR_EL1_DEFAULT
