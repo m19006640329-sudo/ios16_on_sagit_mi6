@@ -1,0 +1,31 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -844,6 +844,28 @@
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+ #endif /* HAS_APPLE_PAC */
+ 
++	/* sagit debug: TTBR0>>16 and TCR as quarter-screen bands before MMU on */
++	mrs	x0, TTBR0_EL1
++	lsr	x0, x0, #16
++	and	w0, w0, #0xffffff
++	orr	w0, w0, #0xff000000
++	ldr	x1, [x20, #40]		/* boot_args Video.v_baseAddr */
++	ldr	x2, [x20, #56]		/* v_rowBytes */
++	ldr	x3, [x20, #72]		/* v_height */
++	lsr	x3, x3, #2
++	mul	x6, x3, x2
++	add	x4, x1, x6
++1:	str	w0, [x1], #4
++	cmp	x1, x4
++	b.lo	1b
++	mrs	x0, TCR_EL1
++	and	w0, w0, #0xffffff
++	orr	w0, w0, #0xff000000
++	add	x5, x4, x6
++2:	str	w0, [x1], #4
++	cmp	x1, x5
++	b.lo	2b
++
+ 	// Enable caches, MMU, ROP and JOP
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0
